@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Distillery Label Engine</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; padding: 20px; max-width: 900px; margin: 0 auto; }
+    label { display: block; margin-top: 10px; font-weight: 600; }
+    input, textarea, select { width: 100%; padding: 6px 8px; margin-top: 4px; box-sizing: border-box; }
+    button { margin-top: 16px; padding: 10px 16px; cursor: pointer; }
+    pre { white-space: pre-wrap; background: #f4f4f4; padding: 10px; border-radius: 4px; margin-top: 16px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .col { flex: 1; min-width: 280px; }
+  </style>
+</head>
+<body>
+  <h1>Distillery Label Engine</h1>
+  <p>Enter product details and generate label copy.</p>
+
+  <div class="row">
+    <div class="col">
+      <label>Brand Name</label>
+      <input id="brandName" value="Cape Charles Distillery" />
+
+      <label>Product Name</label>
+      <input id="productName" placeholder="Straight Bourbon Reserve" />
+
+      <label>Spirit Type</label>
+      <input id="spiritType" placeholder="Straight Bourbon Whiskey" />
+
+      <label>Flavor Notes</label>
+      <input id="flavorNotes" placeholder="caramel, vanilla, toasted oak" />
+
+      <label>ABV (%)</label>
+      <input id="abv" type="number" value="45" />
+
+      <label>Volume (mL)</label>
+      <input id="volumeMl" type="number" value="750" />
+    </div>
+
+    <div class="col">
+      <label>Region</label>
+      <input id="region" placeholder="Cape Charles, Virginia" />
+
+      <label>Tone</label>
+      <select id="tone">
+        <option value="heritage">Heritage / Classic</option>
+        <option value="elegant">Elegant / Premium</option>
+        <option value="playful">Playful / Modern</option>
+        <option value="bold">Bold / Adventurous</option>
+      </select>
+
+      <label>Brand Story (optional)</label>
+      <textarea id="brandStory" rows="4" placeholder="Small-batch spirits inspired by the Eastern Shore..."></textarea>
+
+      <label>Additional Notes (optional)</label>
+      <textarea id="additionalNotes" rows="3" placeholder="Any constraints or requests..."></textarea>
+    </div>
+  </div>
+
+  <button id="generateBtn">Generate Label</button>
+
+  <h2>Result</h2>
+  <div id="result"></div>
+
+  <script>
+    const btn = document.getElementById("generateBtn");
+    const resultDiv = document.getElementById("result");
+
+    btn.addEventListener("click", async () => {
+      resultDiv.textContent = "Generating...";
+      const payload = {
+        brandName: document.getElementById("brandName").value,
+        productName: document.getElementById("productName").value,
+        spiritType: document.getElementById("spiritType").value,
+        flavorNotes: document.getElementById("flavorNotes").value,
+        abv: Number(document.getElementById("abv").value),
+        volumeMl: Number(document.getElementById("volumeMl").value),
+        region: document.getElementById("region").value,
+        tone: document.getElementById("tone").value,
+        brandStory: document.getElementById("brandStory").value,
+        additionalNotes: document.getElementById("additionalNotes").value
+      };
+
+      try {
+        const res = await fetch("/api/labels/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          resultDiv.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+          return;
+        }
+
+        const { label } = data;
+
+        resultDiv.innerHTML = `
+          <h3>Front Label</h3>
+          <pre>${label.frontLabel}</pre>
+          <h3>Back Label</h3>
+          <pre>${label.backLabel}</pre>
+          <h3>Compliance Block</h3>
+          <pre>${label.complianceBlock}</pre>
+        `;
+      } catch (err) {
+        console.error(err);
+        resultDiv.textContent = "Error generating label.";
+      }
+    });
+  </script>
+</body>
+</html>
+
