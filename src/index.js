@@ -11,6 +11,11 @@ const PORT = process.env.PORT || 4000;
 app.use(cors());
 app.use(express.json());
 
+// Health Check
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", message: "Distillery Label Engine is alive" });
+});
+
 // API routes
 app.use("/api/labels", labelRoutes);
 
