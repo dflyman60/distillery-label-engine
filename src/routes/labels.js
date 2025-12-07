@@ -3,6 +3,14 @@ const express = require("express");
 const router = express.Router();
 const openai = require("../openaiClient");
 
+// POST /api/labels/echo - debug helper
+router.post("/echo", (req, res) => {
+  return res.json({
+    received: req.body || null,
+  });
+});
+
+
 // POST /api/labels/generate
 router.post("/generate", async (req, res) => {
   try {
