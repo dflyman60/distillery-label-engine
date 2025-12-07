@@ -92,9 +92,13 @@ Respond with ONLY JSON. No backticks, no commentary.
       spiritType,
       label: parsed,
     });
+
   } catch (err) {
     console.error("Error generating label:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({
+      error: "Internal server error",
+      details: err.message || String(err),
+    });
   }
 });
 
