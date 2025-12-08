@@ -1,0 +1,4 @@
+curl -X POST https://distillery-label-engine-production.up.railway.app/api/labels \
+-H "Content-Type: application/json" \
+:q -d '{"input":"test"}'
+
