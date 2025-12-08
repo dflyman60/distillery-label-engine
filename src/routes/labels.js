@@ -196,5 +196,16 @@ router.get("/history", async (req, res) => {
   }
 });
 
+router.get("/db-test", async (req, res) => {
+  try {
+    const r = await db.query("SELECT NOW()");
+    res.json({ ok: true, now: r.rows[0].now });
+  } catch (err) {
+    console.error("DB test error (prod):", err);
+    res.json({ ok: false, error: String(err) });
+  }
+});
+
+
 module.exports = router;
 
