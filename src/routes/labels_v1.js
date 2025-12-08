@@ -51,7 +51,7 @@ You will receive a brief about a spirit and must return JSON with three fields:
   - volume (ml)
   - origin / region phrasing if provided
 Return ONLY valid JSON. No commentary.
-`.trim();
+`;
 
     const userPrompt = `
 Brand: ${brandName}
@@ -64,7 +64,7 @@ Region: ${region || "not specified"}
 Flavor notes: ${flavorNotes || "not specified"}
 Story / brand background: ${narrativeStory || "none provided"}
 Additional notes: ${additionalNotes || "none"}
-`.trim();
+`;
 
     // 🔮 Call OpenAI
     const completion = await openai.chat.completions.create({
@@ -94,18 +94,9 @@ Additional notes: ${additionalNotes || "none"}
     const complianceBlock =
       parsed.complianceBlock || parsed.compliance_block || "";
 
-    if (!frontLabel || !backLabel || !complianceBlock) {
-      console.error("Parsed JSON missing expected fields:", parsed);
-      return res.status(500).json({
-        error: "Label JSON from OpenAI missing expected fields",
-        parsed,
-      });
-    }
-
-    // 🗄️ Save to Postgres and RETURN id
-    let insertedId = null;
+    // 🗄️ Save to Postgres (INSIDE the async handler – safe to use await)
     try {
-      const result = await db.query(
+      await db.query(
         `
         INSERT INTO labels (
           brand_name,
@@ -123,7 +114,6 @@ Additional notes: ${additionalNotes || "none"}
           compliance_block
         )
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-        RETURNING id
         `,
         [
           brandName,
@@ -141,14 +131,12 @@ Additional notes: ${additionalNotes || "none"}
           complianceBlock,
         ]
       );
-      insertedId = result.rows?.[0]?.id ?? null;
     } catch (dbErr) {
       console.error("Error inserting label into DB:", dbErr);
       // Non-fatal: we still return the generated label
     }
 
     return res.json({
-      id: insertedId,
       brandName,
       productName,
       spiritType,
@@ -208,7 +196,6 @@ router.get("/history", async (req, res) => {
   }
 });
 
-// Simple DB test route (for Railway/local debugging)
 router.get("/db-test", async (req, res) => {
   try {
     const r = await db.query("SELECT NOW()");
@@ -218,6 +205,7 @@ router.get("/db-test", async (req, res) => {
     res.json({ ok: false, error: String(err) });
   }
 });
+
 
 module.exports = router;
 
