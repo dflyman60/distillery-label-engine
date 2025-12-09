@@ -51,7 +51,7 @@ You will receive a brief about a spirit and must return JSON with three fields:
   - volume (ml)
   - origin / region phrasing if provided
 Return ONLY valid JSON. No commentary.
-`.trim();
+`;
 
     const userPrompt = `
 Brand: ${brandName}
@@ -64,7 +64,7 @@ Region: ${region || "not specified"}
 Flavor notes: ${flavorNotes || "not specified"}
 Story / brand background: ${narrativeStory || "none provided"}
 Additional notes: ${additionalNotes || "none"}
-`.trim();
+`;
 
     // 🔮 Call OpenAI
     const completion = await openai.chat.completions.create({
@@ -94,18 +94,9 @@ Additional notes: ${additionalNotes || "none"}
     const complianceBlock =
       parsed.complianceBlock || parsed.compliance_block || "";
 
-    if (!frontLabel || !backLabel || !complianceBlock) {
-      console.error("Parsed JSON missing expected fields:", parsed);
-      return res.status(500).json({
-        error: "Label JSON from OpenAI missing expected fields",
-        parsed,
-      });
-    }
-
-    // 🗄️ Save to Postgres and RETURN id
-    let insertedId = null;
+    // 🗄️ Save to Postgres
     try {
-      const result = await db.query(
+      await db.query(
         `
         INSERT INTO labels (
           brand_name,
@@ -123,7 +114,6 @@ Additional notes: ${additionalNotes || "none"}
           compliance_block
         )
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-        RETURNING id
         `,
         [
           brandName,
@@ -141,14 +131,12 @@ Additional notes: ${additionalNotes || "none"}
           complianceBlock,
         ]
       );
-      insertedId = result.rows?.[0]?.id ?? null;
     } catch (dbErr) {
       console.error("Error inserting label into DB:", dbErr);
       // Non-fatal: we still return the generated label
     }
 
     return res.json({
-      id: insertedId,
       brandName,
       productName,
       spiritType,
@@ -208,7 +196,7 @@ router.get("/history", async (req, res) => {
   }
 });
 
-// Simple DB test route (for Railway/local debugging)
+// Simple DB test
 router.get("/db-test", async (req, res) => {
   try {
     const r = await db.query("SELECT NOW()");
@@ -216,6 +204,114 @@ router.get("/db-test", async (req, res) => {
   } catch (err) {
     console.error("DB test error (prod):", err);
     res.json({ ok: false, error: String(err) });
+  }
+});
+
+//
+// PUT /api/labels/:id  → update existing run
+//
+router.put("/:id", async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+
+  const {
+    brandName,
+    productName,
+    spiritType,
+    abv,
+    volumeMl,
+    tone,
+    region,
+    flavorNotes,
+    brandStory,
+    additionalNotes,
+    frontLabel,
+    backLabel,
+    complianceBlock,
+  } = req.body || {};
+
+  // Require the core fields – we expect full updates from the wizard
+  if (!brandName || !productName || !spiritType || abv == null || volumeMl == null) {
+    return res.status(400).json({
+      error:
+        "Missing required fields for update: brandName, productName, spiritType, abv, volumeMl.",
+    });
+  }
+
+  try {
+    const { rowCount } = await db.query(
+      `
+      UPDATE labels
+      SET
+        brand_name       = $1,
+        product_name     = $2,
+        spirit_type      = $3,
+        abv              = $4,
+        volume_ml        = $5,
+        tone             = $6,
+        flavor_notes     = $7,
+        region           = $8,
+        brand_story      = $9,
+        additional_notes = $10,
+        front_label      = $11,
+        back_label       = $12,
+        compliance_block = $13
+      WHERE id = $14
+      `,
+      [
+        brandName,
+        productName,
+        spiritType,
+        abv,
+        volumeMl,
+        tone || null,
+        flavorNotes || null,
+        region || null,
+        brandStory || null,
+        additionalNotes || null,
+        frontLabel || "",
+        backLabel || "",
+        complianceBlock || "",
+        id,
+      ]
+    );
+
+    if (rowCount === 0) {
+      return res.status(404).json({ error: "Label not found" });
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Error updating label:", err);
+    return res.status(500).json({ error: "Failed to update label" });
+  }
+});
+
+//
+// DELETE /api/labels/:id  → delete existing run
+//
+router.delete("/:id", async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+
+  try {
+    const { rowCount } = await db.query(
+      `DELETE FROM labels WHERE id = $1`,
+      [id]
+    );
+
+    if (rowCount === 0) {
+      return res.status(404).json({ error: "Label not found" });
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Error deleting label:", err);
+    return res.status(500).json({ error: "Failed to delete label" });
   }
 });
 
