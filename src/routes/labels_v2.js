@@ -1,8 +1,8 @@
 // src/routes/labels.js
+import { v4 as uuidv4 } from "uuid";
 
 const express = require("express");
 const router = express.Router();
-const { v4: uuidv4 } = require("uuid");
 
 const openai = require("../openaiClient");
 const db = require("../db");
