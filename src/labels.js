@@ -1,7 +1,7 @@
 // src/routes/labels.js
-const express = require("express");
-const router = express.Router();
-const openai = require("../openaiClient");
+const express = require("express")
+const router = express.Router()
+const openai = require("../openaiClient")
 
 // POST /api/labels/generate
 router.post("/generate", async (req, res) => {
@@ -17,13 +17,13 @@ router.post("/generate", async (req, res) => {
       tone,
       region,
       additionalNotes,
-    } = req.body;
+    } = req.body
 
     if (!productName || !spiritType || !abv || !volumeMl || !brandName) {
       return res.status(400).json({
         error:
           "Missing required fields: productName, spiritType, abv, volumeMl, brandName",
-      });
+      })
     }
 
     const systemPrompt = `
@@ -36,7 +36,7 @@ Rules:
 - No health claims or intoxication promises.
 - No profanity.
 - Avoid statements conflicting with TTB norms.
-`;
+`
 
     const userPrompt = `
 Create label copy for this spirit.
@@ -62,7 +62,7 @@ Return a single JSON object with EXACTLY these fields:
 
 Use proof = abv * 2, and include ABV, proof, and volume in the compliance block.
 Respond with ONLY JSON. No backticks, no commentary.
-`;
+`
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
@@ -72,31 +72,31 @@ Respond with ONLY JSON. No backticks, no commentary.
       ],
       temperature: 0.7,
       max_tokens: 500,
-    });
+    })
 
-    const raw = completion.choices[0]?.message?.content?.trim() || "";
+    const raw = completion.choices[0]?.message?.content?.trim() || ""
 
-    let parsed;
+    let parsed
     try {
-      parsed = JSON.parse(raw);
+      parsed = JSON.parse(raw)
     } catch (e) {
-      console.error("Error parsing JSON from OpenAI:", e, raw);
+      console.error("Error parsing JSON from OpenAI:", e, raw)
       return res.status(500).json({
         error: "Failed to parse label JSON from OpenAI",
         raw,
-      });
+      })
     }
 
     return res.json({
       productName,
       spiritType,
       label: parsed,
-    });
+    })
   } catch (err) {
-    console.error("Error generating label:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    console.error("Error generating label:", err)
+    return res.status(500).json({ error: "Internal server error" })
   }
-});
+})
 
-module.exports = router;
+module.exports = router
 

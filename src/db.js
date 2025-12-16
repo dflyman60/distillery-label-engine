@@ -1,22 +1,22 @@
-// src/db.js
-const { Pool } = require("pg");
+// src/db.js (CommonJS)
+require("dotenv").config()
+
+const { Pool } = require("pg")
 
 if (!process.env.DATABASE_URL) {
-  console.warn("⚠️ DATABASE_URL is not set. Postgres will not be available.");
+  console.error("❌ DATABASE_URL is not set")
 }
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // If you get SSL errors, set PGSSLMODE=disable in Railway
   ssl:
-    process.env.PGSSLMODE === "disable"
-      ? false
-      : {
-          rejectUnauthorized: false,
-        },
-});
+    process.env.NODE_ENV === "production"
+      ? { rejectUnauthorized: false }
+      : undefined,
+})
 
-module.exports = {
-  query: (text, params) => pool.query(text, params),
-};
+// quick sanity log (remove later if you want)
+console.log("✅ pg pool initialized:", typeof pool.connect === "function")
+
+module.exports = pool
 

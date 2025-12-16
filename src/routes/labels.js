@@ -1,608 +1,686 @@
-// src/routes/labels.js
+// src/routes/labels.js (CommonJS)
+const express = require("express")
+const pool = require("../db")
 
-const express = require("express");
-const router = express.Router();
-const { v4: uuidv4 } = require("uuid");
+const router = express.Router()
+console.log("✅ LOADED labels router from:", __filename)
 
-const openai = require("../openaiClient");
-const db = require("../db");
+router.use((req, _res, next) => {
+  console.log("[labels router]", req.method, req.originalUrl)
+  next()
+})
 
-// GET /api/labels/:labelId/cola-status-history
-router.get("/labels/:labelId/cola-status-history", async (req, res) => {
-  try {
-    const { labelId } = req.params;
+function wizardOnly(req, res, next) {
+  const key = req.get("x-wizard-key")
+  const expected = process.env.WIZARD_KEY
 
-    const { rows } = await db.query(
-      `
-      SELECT *
-      FROM cola_status_history
-      WHERE label_id = $1
-      ORDER BY changed_at DESC
-      `,
-      [labelId]
-    );
-
-    res.json(rows);
-  } catch (err) {
-    console.error("Error fetching COLA history:", err);
-    res.status(500).json({ error: "Failed to fetch COLA history" });
+  if (!expected) {
+    return res.status(500).json({ error: "Server misconfigured: WIZARD_KEY not set" })
   }
-});
-
-// POST /api/labels/:labelId/cola-status
-router.post("/labels/:labelId/cola-status", async (req, res) => {
-  try {
-    const { labelId } = req.params;
-    const { status, ttbApplicationId, note, changedBy } = req.body;
-
-    await db.query(
-      `
-      INSERT INTO cola_status_history (
-        label_id,
-        status,
-        ttb_application_id,
-        note,
-        changed_by
-      )
-      VALUES ($1, $2, $3, $4, $5)
-      `,
-      [labelId, status, ttbApplicationId ?? null, note ?? null, changedBy ?? null]
-    );
-
-    const { rows } = await db.query(
-      `
-      SELECT *
-      FROM current_cola_status
-      WHERE label_id = $1
-      `,
-      [labelId]
-    );
-
-    res.json(rows[0]);
-  } catch (err) {
-    console.error("Error updating COLA status:", err);
-    res.status(500).json({ error: "Failed to update COLA status" });
+  if (!key || key !== expected) {
+    return res.status(403).json({ error: "Wizard-only endpoint" })
   }
-});
-
-
-// GET /api/label-history?limit=50
-router.get("/label-history", async (req, res) => {
-  try {
-    const limit = Number(req.query.limit ?? 50);
-
-    const { rows } = await db.query(
-      `
-      SELECT *
-      FROM current_labels_with_cola
-      ORDER BY created_at DESC
-      LIMIT $1
-      `,
-      [limit]
-    );
-
-    res.json(rows);
-  } catch (err) {
-    console.error("Error fetching label history:", err);
-    res.status(500).json({ error: "Failed to fetch label history" });
-  }
-});
-
-// DELETE /api/labels/:labelId
-router.delete("/labels/:labelId", async (req, res) => {
-  try {
-    const { labelId } = req.params;
-
-    // Copy current values into a DELETE record (optional but nice for audit)
-    await db.query(
-      `
-      INSERT INTO label_history (
-        label_id,
-        action,
-        brand_name,
-        product_name,
-        spirit_type,
-        abv,
-        volume_ml,
-        tone,
-        flavor_notes,
-        region,
-        brand_story,
-        additional_notes,
-        front_label,
-        back_label,
-        compliance_block
-      )
-      SELECT
-        label_id,
-        'DELETE' AS action,
-        brand_name,
-        product_name,
-        spirit_type,
-        abv,
-        volume_ml,
-        tone,
-        flavor_notes,
-        region,
-        brand_story,
-        additional_notes,
-        front_label,
-        back_label,
-        compliance_block
-      FROM current_labels
-      WHERE label_id = $1
-      `,
-      [labelId]
-    );
-
-    res.status(204).end();
-  } catch (err) {
-    console.error("Error deleting label:", err);
-    res.status(500).json({ error: "Failed to delete label" });
-  }
-});
-
-// PUT /api/labels/:labelId
-router.put("/labels/:labelId", async (req, res) => {
-  try {
-    const { labelId } = req.params;
-
-    const {
-      brandName,
-      productName,
-      spiritType,
-      abv,
-      volumeMl,
-      tone,
-      flavorNotes,
-      region,
-      brandStory,
-      additionalNotes,
-      frontLabel,
-      backLabel,
-      complianceBlock,
-    } = req.body;
-
-    await db.query(
-      `
-      INSERT INTO label_history (
-        label_id,
-        action,
-        brand_name,
-        product_name,
-        spirit_type,
-        abv,
-        volume_ml,
-        tone,
-        flavor_notes,
-        region,
-        brand_story,
-        additional_notes,
-        front_label,
-        back_label,
-        compliance_block
-      )
-      VALUES ($1, 'UPDATE', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-      `,
-      [
-        labelId,
-        brandName,
-        productName,
-        spiritType,
-        abv,
-        volumeMl,
-        tone,
-        flavorNotes,
-        region,
-        brandStory,
-        additionalNotes,
-        frontLabel,
-        backLabel,
-        complianceBlock,
-      ]
-    );
-
-    const { rows } = await db.query(
-      `
-      SELECT *
-      FROM current_labels_with_cola
-      WHERE label_id = $1
-      `,
-      [labelId]
-    );
-
-    res.json(rows[0]);
-  } catch (err) {
-    console.error("Error updating label:", err);
-    res.status(500).json({ error: "Failed to update label" });
-  }
-});
-
-// POST /api/labels
-router.post("/labels", async (req, res) => {
-  try {
-    const labelId = uuidv4();
-
-    const {
-      brandName,
-      productName,
-      spiritType,
-      abv,
-      volumeMl,
-      tone,
-      flavorNotes,
-      region,
-      brandStory,
-      additionalNotes,
-      frontLabel,
-      backLabel,
-      complianceBlock,
-    } = req.body;
-
-    await db.query(
-      `
-      INSERT INTO label_history (
-        label_id,
-        action,
-        brand_name,
-        product_name,
-        spirit_type,
-        abv,
-        volume_ml,
-        tone,
-        flavor_notes,
-        region,
-        brand_story,
-        additional_notes,
-        front_label,
-        back_label,
-        compliance_block
-      )
-      VALUES ($1, 'CREATE', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-      `,
-      [
-        labelId,
-        brandName,
-        productName,
-        spiritType,
-        abv,
-        volumeMl,
-        tone,
-        flavorNotes,
-        region,
-        brandStory,
-        additionalNotes,
-        frontLabel,
-        backLabel,
-        complianceBlock,
-      ]
-    );
-
-    const { rows } = await db.query(
-      `
-      SELECT *
-      FROM current_labels_with_cola
-      WHERE label_id = $1
-      `,
-      [labelId]
-    );
-
-    res.json(rows[0]);
-  } catch (err) {
-    console.error("Error creating label:", err);
-    res.status(500).json({ error: "Failed to create label" });
-  }
-});
-
-// POST /api/labels/generate
-router.post("/generate", async (req, res) => {
-  try {
-    const {
-      brandName,
-      productName,
-      spiritType,
-      abv,
-      volumeMl,
-      tone,
-      region,
-      flavorNotes,
-      story,
-      brandStory,
-      additionalNotes,
-    } = req.body || {};
-
-    // Basic validation for required fields
-    if (!brandName || !productName || !spiritType || !abv || !volumeMl) {
-      return res.status(400).json({
-        error:
-          "Missing required fields: brandName, productName, spiritType, abv, volumeMl are required.",
-      });
-    }
-
-    const narrativeStory = brandStory || story || "";
-
-    const systemPrompt = `
-You are an expert craft-spirits label copywriter who understands both marketing and TTB compliance.
-You will receive a brief about a spirit and must return JSON with three fields:
-
-{
-  "frontLabel": "...",
-  "backLabel": "...",
-  "complianceBlock": "..."
+  next()
 }
 
-- "frontLabel": short, punchy hero text suitable for the front label.
-- "backLabel": longer story / tasting notes suitable for the back label, 80–140 words.
-- "complianceBlock": highly compressed, compliance-focused block that includes:
-  - brand name
-  - product type
-  - ABV (% Alc/Vol)
-  - volume (ml)
-  - origin / region phrasing if provided
-Return ONLY valid JSON. No commentary.
-`;
+const FORBIDDEN_CONTENT_FIELDS = new Set([
+  "frontLabel",
+  "backLabel",
+  "complianceBlock",
+  "brief",
+  "front_label",
+  "back_label",
+  "compliance_block",
+])
 
-    const userPrompt = `
-Brand: ${brandName}
-Product: ${productName}
-Spirit type: ${spiritType}
-ABV: ${abv}%
-Volume: ${volumeMl} ml
-Tone: ${tone || "not specified"}
-Region: ${region || "not specified"}
-Flavor notes: ${flavorNotes || "not specified"}
-Story / brand background: ${narrativeStory || "none provided"}
-Additional notes: ${additionalNotes || "none"}
-`;
+const ALLOWED_METADATA_FIELDS = new Set([
+  "internalNotes",
+  "status",
+  "tags",
+  "ttbTrackingNumber",
+  "ttbApplicationId",
+])
 
-    // 🔮 Call OpenAI
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-    });
-
-    const raw = completion.choices?.[0]?.message?.content || "";
-
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (e) {
-      console.error("Error parsing JSON from OpenAI:", e, raw);
-      return res.status(500).json({
-        error: "Failed to parse label JSON from OpenAI",
-        raw,
-      });
-    }
-
-    const frontLabel = parsed.frontLabel || parsed.front_label || "";
-    const backLabel = parsed.backLabel || parsed.back_label || "";
-    const complianceBlock =
-      parsed.complianceBlock || parsed.compliance_block || "";
-
-    // 🗄️ Save to Postgres
-    try {
-      await db.query(
-        `
-        INSERT INTO labels (
-          brand_name,
-          product_name,
-          spirit_type,
-          abv,
-          volume_ml,
-          tone,
-          flavor_notes,
-          region,
-          brand_story,
-          additional_notes,
-          front_label,
-          back_label,
-          compliance_block
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-        `,
-        [
-          brandName,
-          productName,
-          spiritType,
-          abv,
-          volumeMl,
-          tone || null,
-          flavorNotes || null,
-          region || null,
-          narrativeStory || null,
-          additionalNotes || null,
-          frontLabel,
-          backLabel,
-          complianceBlock,
-        ]
-      );
-    } catch (dbErr) {
-      console.error("Error inserting label into DB:", dbErr);
-      // Non-fatal: we still return the generated label
-    }
-
-    return res.json({
-      brandName,
-      productName,
-      spiritType,
-      abv,
-      volumeMl,
-      tone,
-      region,
-      flavorNotes,
-      brandStory: narrativeStory,
-      additionalNotes,
-      label: {
-        frontLabel,
-        backLabel,
-        complianceBlock,
-      },
-    });
-  } catch (err) {
-    console.error("Unexpected error in /generate:", err);
-    return res.status(500).json({ error: "Internal server error" });
+function hasForbiddenContent(body) {
+  for (const k of Object.keys(body || {})) {
+    if (FORBIDDEN_CONTENT_FIELDS.has(k)) return k
   }
-});
+  return null
+}
 
-// GET /api/labels/history?limit=20
-router.get("/history", async (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit, 10) || 20, 200);
+function pickAllowedMetadata(body) {
+  const out = {}
+  for (const k of Object.keys(body || {})) {
+    if (ALLOWED_METADATA_FIELDS.has(k)) out[k] = body[k]
+  }
+  return out
+}
+
+/**
+ * IMPORTANT:
+ * Your stack trace shows you're using the standalone `router` package
+ * (node_modules/router/...), which does NOT support Express-style regex routes
+ * like "/:labelId(\\d+)".
+ *
+ * So we validate labelId via router.param instead.
+ */
+router.param("labelId", (req, res, next, value) => {
+  const n = Number(value)
+  if (!Number.isInteger(n) || n <= 0) {
+    return res.status(400).json({ error: "labelId must be a positive integer" })
+  }
+  // normalize
+  req.params.labelId = String(n)
+  next()
+})
+
+function getLabelIdNum(req) {
+  return Number(req.params.labelId)
+}
+
+/* =========================================================
+   GLOBAL HISTORY FEED (Step 2A / LabelHistoryRadial)
+   GET /api/labels/label-history?limit=50
+   Returns: { ok: true, items: [...] }
+   ========================================================= */
+router.get("/label-history", async (req, res) => {
+  const limitRaw = Number(req.query.limit || 50)
+  const limit = Math.min(Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 50), 250)
 
   try {
-    const { rows } = await db.query(
+    const q = await pool.query(
       `
       SELECT
         id,
-        brand_name       AS "brandName",
-        product_name     AS "productName",
-        spirit_type      AS "spiritType",
+        label_id,
+        action,
+        brand_name,
+        product_name,
+        spirit_type,
         abv,
-        volume_ml        AS "volumeMl",
+        volume_ml,
         tone,
-        flavor_notes     AS "flavorNotes",
+        flavor_notes,
         region,
-        brand_story      AS "brandStory",
-        additional_notes AS "additionalNotes",
-        front_label      AS "frontLabel",
-        back_label       AS "backLabel",
-        compliance_block AS "complianceBlock",
-        created_at       AS "createdAt"
-      FROM labels
-      ORDER BY created_at DESC
+        brand_story,
+        additional_notes,
+        front_label,
+        back_label,
+        compliance_block,
+        created_at,
+        cola_status,
+        cola_application_id,
+        cola_last_changed_at
+      FROM label_history
+      ORDER BY created_at DESC, id DESC
       LIMIT $1
       `,
       [limit]
-    );
+    )
 
-    return res.json({ items: rows });
+    const items = q.rows.map((r) => ({
+      id: r.id,
+      labelId: r.label_id,
+      action: r.action,
+      brandName: r.brand_name,
+      productName: r.product_name,
+      spiritType: r.spirit_type,
+      abv: r.abv,
+      volumeMl: r.volume_ml,
+      tone: r.tone ?? null,
+      flavorNotes: r.flavor_notes ?? null,
+      region: r.region ?? null,
+      brandStory: r.brand_story ?? null,
+      additionalNotes: r.additional_notes ?? null,
+      frontLabel: r.front_label,
+      backLabel: r.back_label,
+      complianceBlock: r.compliance_block,
+      createdAt: r.created_at,
+      colaStatus: r.cola_status ?? null,
+      colaApplicationId: r.cola_application_id ?? null,
+      colaLastChangedAt: r.cola_last_changed_at ?? null,
+    }))
+
+    return res.json({ ok: true, items })
   } catch (err) {
-    console.error("Error fetching label history:", err);
-    return res.status(500).json({ error: "Failed to load history" });
+    return res.status(500).json({
+      error: "Failed to load label history",
+      detail: String(err && err.message ? err.message : err),
+    })
   }
-});
+})
 
-// Simple DB test
-router.get("/db-test", async (req, res) => {
-  try {
-    const r = await db.query("SELECT NOW()");
-    res.json({ ok: true, now: r.rows[0].now });
-  } catch (err) {
-    console.error("DB test error (prod):", err);
-    res.json({ ok: false, error: String(err) });
-  }
-});
+/* =========================================================
+   STEP 1 WIRING (manual insert) — POST /api/labels/label-history
+   Accepts snake_case OR camelCase body, returns 201 + version
+   ========================================================= */
+router.post("/label-history", async (req, res) => {
+  const body = req.body || {}
 
-//
-// PUT /api/labels/:id  → update existing run
-//
-router.put("/:id", async (req, res) => {
-  const id = parseInt(req.params.id, 10);
-  if (!Number.isFinite(id)) {
-    return res.status(400).json({ error: "Invalid id" });
+  const labelId = Number(body.label_id ?? body.labelId)
+  const action = String(body.action ?? "CREATE").toUpperCase()
+
+  if (!Number.isInteger(labelId) || labelId <= 0) {
+    return res.status(400).json({ error: "label_id must be a positive integer" })
   }
 
-  const {
-    brandName,
-    productName,
-    spiritType,
-    abv,
-    volumeMl,
-    tone,
-    region,
-    flavorNotes,
-    brandStory,
-    additionalNotes,
-    frontLabel,
-    backLabel,
-    complianceBlock,
-  } = req.body || {};
+  const brandName = body.brand_name ?? body.brandName
+  const productName = body.product_name ?? body.productName
+  const spiritType = body.spirit_type ?? body.spiritType
+  const abv = body.abv
+  const volumeMl = body.volume_ml ?? body.volumeMl
+  const frontLabel = body.front_label ?? body.frontLabel
+  const backLabel = body.back_label ?? body.backLabel
+  const complianceBlock = body.compliance_block ?? body.complianceBlock
 
-  // Require the core fields – we expect full updates from the wizard
-  if (!brandName || !productName || !spiritType || abv == null || volumeMl == null) {
+  if (
+    !brandName ||
+    !productName ||
+    !spiritType ||
+    abv === undefined ||
+    volumeMl === undefined ||
+    !frontLabel ||
+    !backLabel ||
+    !complianceBlock
+  ) {
     return res.status(400).json({
       error:
-        "Missing required fields for update: brandName, productName, spiritType, abv, volumeMl.",
-    });
+        "Missing required fields: label_id, brand_name, product_name, spirit_type, abv, volume_ml, front_label, back_label, compliance_block",
+    })
   }
 
+  const historyColaStatus = body.history_cola_status ?? body.cola_status ?? null
+  const historyColaApplicationId =
+    body.history_cola_application_id ?? body.cola_application_id ?? null
+  const historyColaLastChangedAt =
+    body.history_cola_last_changed_at ?? body.cola_last_changed_at ?? null
+
+  const client = await pool.connect()
   try {
-    const { rowCount } = await db.query(
+    await client.query("BEGIN")
+
+    await client.query(
       `
-      UPDATE labels
-      SET
-        brand_name       = $1,
-        product_name     = $2,
-        spirit_type      = $3,
-        abv              = $4,
-        volume_ml        = $5,
-        tone             = $6,
-        flavor_notes     = $7,
-        region           = $8,
-        brand_story      = $9,
-        additional_notes = $10,
-        front_label      = $11,
-        back_label       = $12,
-        compliance_block = $13
-      WHERE id = $14
+      INSERT INTO labels (
+        id,
+        brand_name,
+        product_name,
+        spirit_type,
+        abv,
+        volume_ml,
+        front_label,
+        back_label,
+        compliance_block,
+        current_history_id
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL)
+      ON CONFLICT (id) DO UPDATE SET
+        brand_name       = EXCLUDED.brand_name,
+        product_name     = EXCLUDED.product_name,
+        spirit_type      = EXCLUDED.spirit_type,
+        abv              = EXCLUDED.abv,
+        volume_ml        = EXCLUDED.volume_ml,
+        front_label      = EXCLUDED.front_label,
+        back_label       = EXCLUDED.back_label,
+        compliance_block = EXCLUDED.compliance_block
       `,
       [
+        labelId,
         brandName,
         productName,
         spiritType,
-        abv,
-        volumeMl,
-        tone || null,
-        flavorNotes || null,
-        region || null,
-        brandStory || null,
-        additionalNotes || null,
-        frontLabel || "",
-        backLabel || "",
-        complianceBlock || "",
-        id,
+        Number(abv),
+        Number(volumeMl),
+        frontLabel,
+        backLabel,
+        complianceBlock,
       ]
-    );
+    )
 
-    if (rowCount === 0) {
-      return res.status(404).json({ error: "Label not found" });
-    }
+    const insertHistory = await client.query(
+      `
+      INSERT INTO label_history (
+        label_id,
+        action,
+        brand_name,
+        product_name,
+        spirit_type,
+        abv,
+        volume_ml,
+        tone,
+        flavor_notes,
+        region,
+        brand_story,
+        additional_notes,
+        front_label,
+        back_label,
+        compliance_block,
+        cola_status,
+        cola_application_id,
+        cola_last_changed_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+      RETURNING *
+      `,
+      [
+        labelId,
+        action,
+        brandName,
+        productName,
+        spiritType,
+        Number(abv),
+        Number(volumeMl),
+        body.tone ?? null,
+        body.flavor_notes ?? body.flavorNotes ?? null,
+        body.region ?? null,
+        body.brand_story ?? body.brandStory ?? null,
+        body.additional_notes ?? body.additionalNotes ?? null,
+        frontLabel,
+        backLabel,
+        complianceBlock,
+        historyColaStatus,
+        historyColaApplicationId,
+        historyColaLastChangedAt,
+      ]
+    )
 
-    return res.json({ ok: true });
+    const v = insertHistory.rows[0]
+
+    await client.query(`UPDATE labels SET current_history_id = $2 WHERE id = $1`, [
+      labelId,
+      v.id,
+    ])
+
+    await client.query("COMMIT")
+
+    return res.status(201).json({
+      ok: true,
+      version: {
+        id: v.id,
+        labelId: v.label_id,
+        action: v.action,
+        brandName: v.brand_name,
+        productName: v.product_name,
+        spiritType: v.spirit_type,
+        abv: v.abv,
+        volumeMl: v.volume_ml,
+        tone: v.tone ?? null,
+        flavorNotes: v.flavor_notes ?? null,
+        region: v.region ?? null,
+        brandStory: v.brand_story ?? null,
+        additionalNotes: v.additional_notes ?? null,
+        frontLabel: v.front_label,
+        backLabel: v.back_label,
+        complianceBlock: v.compliance_block,
+        colaStatus: v.cola_status,
+        colaApplicationId: v.cola_application_id,
+        colaLastChangedAt: v.cola_last_changed_at,
+        createdAt: v.created_at,
+      },
+    })
   } catch (err) {
-    console.error("Error updating label:", err);
-    return res.status(500).json({ error: "Failed to update label" });
+    await client.query("ROLLBACK")
+    return res.status(500).json({
+      error: "Failed to insert label_history",
+      detail: String(err && err.message ? err.message : err),
+    })
+  } finally {
+    client.release()
   }
-});
+})
 
-//
-// DELETE /api/labels/:id  → delete existing run
-//
-router.delete("/:id", async (req, res) => {
-  const id = parseInt(req.params.id, 10);
-  if (!Number.isFinite(id)) {
-    return res.status(400).json({ error: "Invalid id" });
+/* =========================================================
+   GET a label snapshot + current version
+   GET /api/labels/:labelId
+   ========================================================= */
+router.get("/:labelId", async (req, res) => {
+  const labelIdNum = getLabelIdNum(req)
+
+  try {
+    const q = await pool.query(
+      `
+      SELECT
+        l.*,
+        h.id            AS history_id,
+        h.action        AS history_action,
+        h.created_at    AS history_created_at,
+        h.brand_name    AS h_brand_name,
+        h.product_name  AS h_product_name,
+        h.spirit_type   AS h_spirit_type,
+        h.abv           AS h_abv,
+        h.volume_ml     AS h_volume_ml,
+        h.front_label   AS h_front_label,
+        h.back_label    AS h_back_label,
+        h.compliance_block AS h_compliance_block,
+        h.cola_status           AS h_cola_status,
+        h.cola_application_id   AS h_cola_application_id,
+        h.cola_last_changed_at  AS h_cola_last_changed_at
+      FROM labels l
+      LEFT JOIN label_history h
+        ON h.id = l.current_history_id
+      WHERE l.id = $1
+      `,
+      [labelIdNum]
+    )
+
+    if (q.rows.length === 0) return res.status(404).json({ error: "Label not found" })
+
+    const row = q.rows[0]
+
+    const label = { ...row }
+    delete label.history_id
+    delete label.history_action
+    delete label.history_created_at
+    delete label.h_brand_name
+    delete label.h_product_name
+    delete label.h_spirit_type
+    delete label.h_abv
+    delete label.h_volume_ml
+    delete label.h_front_label
+    delete label.h_back_label
+    delete label.h_compliance_block
+    delete label.h_cola_status
+    delete label.h_cola_application_id
+    delete label.h_cola_last_changed_at
+
+    const currentVersion =
+      row.history_id == null
+        ? null
+        : {
+            id: row.history_id,
+            action: row.history_action,
+            createdAt: row.history_created_at,
+            brandName: row.h_brand_name,
+            productName: row.h_product_name,
+            spiritType: row.h_spirit_type,
+            abv: row.h_abv,
+            volumeMl: row.h_volume_ml,
+            frontLabel: row.h_front_label,
+            backLabel: row.h_back_label,
+            complianceBlock: row.h_compliance_block,
+            colaStatus: row.h_cola_status ?? null,
+            colaApplicationId: row.h_cola_application_id ?? null,
+            colaLastChangedAt: row.h_cola_last_changed_at ?? null,
+          }
+
+    return res.json({ ok: true, label, currentVersion })
+  } catch (err) {
+    return res.status(500).json({
+      error: "Failed to load label",
+      detail: String(err && err.message ? err.message : err),
+    })
+  }
+})
+
+/* =========================================================
+   GET versions for a specific label (newest first)
+   GET /api/labels/:labelId/history?limit=50
+   ========================================================= */
+router.get("/:labelId/history", async (req, res) => {
+  const labelIdNum = getLabelIdNum(req)
+
+  const limitRaw = Number(req.query.limit || 50)
+  const limit = Math.min(Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 50), 250)
+
+  try {
+    const q = await pool.query(
+      `
+      SELECT
+        id,
+        label_id,
+        action,
+        brand_name,
+        product_name,
+        spirit_type,
+        abv,
+        volume_ml,
+        front_label,
+        back_label,
+        compliance_block,
+        created_at,
+        cola_status,
+        cola_application_id,
+        cola_last_changed_at
+      FROM label_history
+      WHERE label_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT $2
+      `,
+      [labelIdNum, limit]
+    )
+
+    const versions = q.rows.map((r) => ({
+      id: r.id,
+      labelId: r.label_id,
+      action: r.action,
+      brandName: r.brand_name,
+      productName: r.product_name,
+      spiritType: r.spirit_type,
+      abv: r.abv,
+      volumeMl: r.volume_ml,
+      frontLabel: r.front_label,
+      backLabel: r.back_label,
+      complianceBlock: r.compliance_block,
+      createdAt: r.created_at,
+      colaStatus: r.cola_status ?? null,
+      colaApplicationId: r.cola_application_id ?? null,
+      colaLastChangedAt: r.cola_last_changed_at ?? null,
+    }))
+
+    return res.json({ ok: true, versions })
+  } catch (err) {
+    return res.status(500).json({
+      error: "Failed to load history",
+      detail: String(err && err.message ? err.message : err),
+    })
+  }
+})
+
+/* =========================================================
+   WIZARD SAVE
+   POST /api/labels/:labelId/wizard/save
+   ========================================================= */
+router.post("/:labelId/wizard/save", wizardOnly, async (req, res) => {
+  const labelIdNum = getLabelIdNum(req)
+  const body = req.body || {}
+
+  const brandName = body.brandName
+  const spiritType = body.spiritType
+  const productName = body.productName
+  const abv = body.abv
+  const volumeMl = body.volumeMl
+  const frontLabel = body.frontLabel
+  const backLabel = body.backLabel
+  const complianceBlock = body.complianceBlock
+
+  if (
+    !brandName ||
+    !spiritType ||
+    !productName ||
+    abv === undefined ||
+    volumeMl === undefined ||
+    !frontLabel ||
+    !backLabel ||
+    !complianceBlock
+  ) {
+    return res.status(400).json({
+      error:
+        "Missing required fields: brandName, spiritType, productName, abv, volumeMl, frontLabel, backLabel, complianceBlock",
+    })
+  }
+
+  const client = await pool.connect()
+  try {
+    await client.query("BEGIN")
+
+    await client.query(
+      `
+      INSERT INTO labels (
+        id,
+        brand_name,
+        product_name,
+        spirit_type,
+        abv,
+        volume_ml,
+        front_label,
+        back_label,
+        compliance_block,
+        current_history_id
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL)
+      ON CONFLICT (id) DO UPDATE SET
+        brand_name       = EXCLUDED.brand_name,
+        product_name     = EXCLUDED.product_name,
+        spirit_type      = EXCLUDED.spirit_type,
+        abv              = EXCLUDED.abv,
+        volume_ml        = EXCLUDED.volume_ml,
+        front_label      = EXCLUDED.front_label,
+        back_label       = EXCLUDED.back_label,
+        compliance_block = EXCLUDED.compliance_block
+      `,
+      [
+        labelIdNum,
+        brandName,
+        productName,
+        spiritType,
+        Number(abv),
+        Number(volumeMl),
+        frontLabel,
+        backLabel,
+        complianceBlock,
+      ]
+    )
+
+    const cur = await client.query(`SELECT current_history_id FROM labels WHERE id = $1`, [
+      labelIdNum,
+    ])
+    const action = cur.rows[0]?.current_history_id ? "UPDATE" : "CREATE"
+
+    const insertHistory = await client.query(
+      `
+      INSERT INTO label_history (
+        label_id,
+        action,
+        brand_name,
+        product_name,
+        spirit_type,
+        abv,
+        volume_ml,
+        front_label,
+        back_label,
+        compliance_block
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      RETURNING *
+      `,
+      [
+        labelIdNum,
+        action,
+        brandName,
+        productName,
+        spiritType,
+        Number(abv),
+        Number(volumeMl),
+        frontLabel,
+        backLabel,
+        complianceBlock,
+      ]
+    )
+
+    const v = insertHistory.rows[0]
+
+    await client.query(`UPDATE labels SET current_history_id = $2 WHERE id = $1`, [
+      labelIdNum,
+      v.id,
+    ])
+
+    await client.query("COMMIT")
+
+    return res.json({
+      ok: true,
+      version: {
+        id: v.id,
+        labelId: v.label_id,
+        action: v.action,
+        brandName: v.brand_name,
+        productName: v.product_name,
+        spiritType: v.spirit_type,
+        abv: v.abv,
+        volumeMl: v.volume_ml,
+        frontLabel: v.front_label,
+        backLabel: v.back_label,
+        complianceBlock: v.compliance_block,
+        createdAt: v.created_at,
+      },
+    })
+  } catch (err) {
+    await client.query("ROLLBACK")
+    return res.status(500).json({
+      error: "Wizard save failed",
+      detail: String(err && err.message ? err.message : err),
+    })
+  } finally {
+    client.release()
+  }
+})
+
+/* =========================================================
+   PATCH metadata only (no content edits)
+   PATCH /api/labels/:labelId
+   ========================================================= */
+router.patch("/:labelId", async (req, res) => {
+  const labelIdNum = getLabelIdNum(req)
+  const body = req.body || {}
+
+  const forbidden = hasForbiddenContent(body)
+  if (forbidden) {
+    return res.status(403).json({
+      error: "Label content is wizard-only and versioned via label_history",
+      field: forbidden,
+    })
+  }
+
+  const meta = pickAllowedMetadata(body)
+  const keys = Object.keys(meta)
+
+  if (keys.length === 0) {
+    return res.json({ ok: true, updated: false, reason: "No allowed fields" })
+  }
+
+  const exists = await pool.query(`SELECT 1 FROM labels WHERE id = $1`, [labelIdNum])
+  if (exists.rows.length === 0) {
+    return res.status(404).json({ error: "Label not found. Create it via the Wizard first." })
+  }
+
+  const mapKey = (k) => {
+    if (k === "internalNotes") return "internal_notes"
+    if (k === "ttbTrackingNumber") return "ttb_tracking_number"
+    if (k === "ttbApplicationId") return "ttb_application_id"
+    return k
+  }
+
+  const setClauses = []
+  const values = [labelIdNum]
+  let idx = 2
+
+  for (const k of keys) {
+    setClauses.push(`${mapKey(k)} = $${idx++}`)
+    values.push(meta[k])
   }
 
   try {
-    const { rowCount } = await db.query(
-      `DELETE FROM labels WHERE id = $1`,
-      [id]
-    );
-
-    if (rowCount === 0) {
-      return res.status(404).json({ error: "Label not found" });
-    }
-
-    return res.json({ ok: true });
+    const q = await pool.query(
+      `UPDATE labels SET ${setClauses.join(", ")} WHERE id = $1 RETURNING *`,
+      values
+    )
+    return res.json({ ok: true, updated: true, label: q.rows[0] })
   } catch (err) {
-    console.error("Error deleting label:", err);
-    return res.status(500).json({ error: "Failed to delete label" });
+    return res.status(500).json({
+      error: "Metadata update failed",
+      detail: String(err && err.message ? err.message : err),
+    })
   }
-});
+})
 
-module.exports = router;
+module.exports = router
 
