@@ -1,3 +1,4 @@
+
 // src/routes/labels.js (CommonJS)
 const express = require("express")
 const pool = require("../db")
@@ -10,6 +11,26 @@ router.use((req, _res, next) => {
   next()
 })
 
+/* =========================================================
+   Helpers
+   ========================================================= */
+function parsePositiveInt(value) {
+  const n = Number(value)
+  return Number.isInteger(n) && n > 0 ? n : null
+}
+
+function getLabelIdNum(req, res) {
+  const n = parsePositiveInt(req.params.labelId)
+  if (!n) {
+    res.status(400).json({ error: "labelId must be a positive integer" })
+    return null
+  }
+  return n
+}
+
+/* =========================================================
+   Auth guard for wizard-only endpoints
+   ========================================================= */
 function wizardOnly(req, res, next) {
   const key = req.get("x-wizard-key")
   const expected = process.env.WIZARD_KEY
@@ -23,6 +44,9 @@ function wizardOnly(req, res, next) {
   next()
 }
 
+/* =========================================================
+   Metadata-only PATCH protections
+   ========================================================= */
 const FORBIDDEN_CONTENT_FIELDS = new Set([
   "frontLabel",
   "backLabel",
@@ -56,34 +80,14 @@ function pickAllowedMetadata(body) {
   return out
 }
 
-/**
- * IMPORTANT:
- * Your stack trace shows you're using the standalone `router` package
- * (node_modules/router/...), which does NOT support Express-style regex routes
- * like "/:labelId(\\d+)".
- *
- * So we validate labelId via router.param instead.
- */
-router.param("labelId", (req, res, next, value) => {
-  const n = Number(value)
-  if (!Number.isInteger(n) || n <= 0) {
-    return res.status(400).json({ error: "labelId must be a positive integer" })
-  }
-  // normalize
-  req.params.labelId = String(n)
-  next()
-})
-
-function getLabelIdNum(req) {
-  return Number(req.params.labelId)
-}
-
 /* =========================================================
-   GLOBAL HISTORY FEED (Step 2A / LabelHistoryRadial)
-   GET /api/labels/label-history?limit=50
+   ✅ GLOBAL HISTORY FEED
+   IMPORTANT: This MUST be defined BEFORE any "/:labelId" routes.
+   GET /api/labels/history?limit=50
+   GET /api/labels/label-history?limit=50  (alias)
    Returns: { ok: true, items: [...] }
    ========================================================= */
-router.get("/label-history", async (req, res) => {
+async function globalHistoryHandler(req, res) {
   const limitRaw = Number(req.query.limit || 50)
   const limit = Math.min(Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 50), 250)
 
@@ -148,94 +152,172 @@ router.get("/label-history", async (req, res) => {
       detail: String(err && err.message ? err.message : err),
     })
   }
-})
+}
+
+router.get("/history", globalHistoryHandler)
+router.get("/label-history", globalHistoryHandler)
 
 /* =========================================================
-   STEP 1 WIRING (manual insert) — POST /api/labels/label-history
-   Accepts snake_case OR camelCase body, returns 201 + version
+   GENERATE (used by Wizard)
+   POST /api/labels/generate
    ========================================================= */
-router.post("/label-history", async (req, res) => {
+router.post("/generate", async (req, res) => {
   const body = req.body || {}
 
-  const labelId = Number(body.label_id ?? body.labelId)
-  const action = String(body.action ?? "CREATE").toUpperCase()
+  const brandName = String(body.brandName ?? "").trim()
+  const productName = String(body.productName ?? "").trim()
+  const spiritType = String(body.spiritType ?? "").trim()
+  const tone = String(body.tone ?? "").trim() || "heritage"
+  const region = String(body.region ?? "").trim()
+  const brandStory = String(body.brandStory ?? "").trim()
+  const flavorNotes = String(body.flavorNotes ?? "").trim()
+  const additionalNotes = String(body.additionalNotes ?? "").trim()
 
-  if (!Number.isInteger(labelId) || labelId <= 0) {
-    return res.status(400).json({ error: "label_id must be a positive integer" })
-  }
+  const abv = Number(body.abv)
+  const volumeMl = Number(body.volumeMl)
 
-  const brandName = body.brand_name ?? body.brandName
-  const productName = body.product_name ?? body.productName
-  const spiritType = body.spirit_type ?? body.spiritType
-  const abv = body.abv
-  const volumeMl = body.volume_ml ?? body.volumeMl
-  const frontLabel = body.front_label ?? body.frontLabel
-  const backLabel = body.back_label ?? body.backLabel
-  const complianceBlock = body.compliance_block ?? body.complianceBlock
-
-  if (
-    !brandName ||
-    !productName ||
-    !spiritType ||
-    abv === undefined ||
-    volumeMl === undefined ||
-    !frontLabel ||
-    !backLabel ||
-    !complianceBlock
-  ) {
+  if (!brandName || !productName || !spiritType || !Number.isFinite(abv) || !Number.isFinite(volumeMl)) {
     return res.status(400).json({
-      error:
-        "Missing required fields: label_id, brand_name, product_name, spirit_type, abv, volume_ml, front_label, back_label, compliance_block",
+      error: "Missing required fields: brandName, productName, spiritType, abv, volumeMl",
     })
   }
 
-  const historyColaStatus = body.history_cola_status ?? body.cola_status ?? null
-  const historyColaApplicationId =
-    body.history_cola_application_id ?? body.cola_application_id ?? null
-  const historyColaLastChangedAt =
-    body.history_cola_last_changed_at ?? body.cola_last_changed_at ?? null
+  const maybeId = parsePositiveInt(body.id)
+  const hasValidId = !!maybeId
+
+  let frontLabel = ""
+  let backLabel = ""
+  const complianceBlock =
+    "GOVERNMENT WARNING: (1) According to the Surgeon General, women should not drink alcoholic beverages during pregnancy because of the risk of birth defects. (2) Consumption of alcoholic beverages impairs your ability to drive a car or operate machinery, and may cause health problems."
+
+  try {
+    const key = process.env.OPENAI_API_KEY
+    if (key) {
+      const prompt = [
+        `Write premium US spirits label copy.`,
+        `Brand: ${brandName}`,
+        `Product: ${productName}`,
+        `Type: ${spiritType}`,
+        `ABV: ${abv}%`,
+        `Volume: ${volumeMl}ml`,
+        `Tone/style: ${tone}`,
+        region ? `Region: ${region}` : null,
+        flavorNotes ? `Flavor notes: ${flavorNotes}` : null,
+        brandStory ? `Brand story: ${brandStory}` : null,
+        additionalNotes ? `Additional notes: ${additionalNotes}` : null,
+        ``,
+        `Return JSON with keys: frontLabel, backLabel (no markdown).`,
+      ]
+        .filter(Boolean)
+        .join("\n")
+
+      const r = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify({
+          model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+          messages: [
+            { role: "system", content: "You write compliant, marketing-grade spirits label copy." },
+            { role: "user", content: prompt },
+          ],
+          temperature: 0.7,
+        }),
+      })
+
+      if (!r.ok) {
+        const t = await r.text().catch(() => "")
+        throw new Error(`OpenAI error ${r.status}: ${t}`)
+      }
+
+      const data = await r.json()
+      const text = data?.choices?.[0]?.message?.content || ""
+
+      let parsed = null
+      try {
+        parsed = JSON.parse(text)
+      } catch {}
+
+      if (parsed && typeof parsed === "object") {
+        frontLabel = String(parsed.frontLabel || "").trim()
+        backLabel = String(parsed.backLabel || "").trim()
+      }
+
+      if (!frontLabel || !backLabel) {
+        const parts = String(text).split(/\n{2,}/).map((s) => s.trim()).filter(Boolean)
+        frontLabel = frontLabel || parts[0] || `${brandName}\n${productName}\n${spiritType}`
+        backLabel =
+          backLabel ||
+          parts.slice(1).join("\n\n") ||
+          `${productName} is crafted in small batches. Notes: ${flavorNotes || "—"}.`
+      }
+    } else {
+      frontLabel = `${brandName}\n${productName}\n${spiritType}\n${abv}% ABV • ${volumeMl}ml`
+      backLabel = [
+        `${productName} from ${brandName}.`,
+        region ? `Crafted in ${region}.` : null,
+        flavorNotes ? `Tasting notes: ${flavorNotes}.` : null,
+        brandStory ? brandStory : null,
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    }
+  } catch (err) {
+    return res.status(500).json({
+      error: "Failed to generate label copy",
+      detail: String(err && err.message ? err.message : err),
+    })
+  }
 
   const client = await pool.connect()
   try {
     await client.query("BEGIN")
 
-    await client.query(
-      `
-      INSERT INTO labels (
-        id,
-        brand_name,
-        product_name,
-        spirit_type,
-        abv,
-        volume_ml,
-        front_label,
-        back_label,
-        compliance_block,
-        current_history_id
+    let labelIdNum = null
+    let action = "CREATE"
+
+    if (hasValidId) {
+      labelIdNum = maybeId
+
+      const exists = await client.query(`SELECT current_history_id FROM labels WHERE id = $1`, [labelIdNum])
+      action = exists.rows.length > 0 && exists.rows[0]?.current_history_id ? "UPDATE" : "CREATE"
+
+      await client.query(
+        `
+        INSERT INTO labels (
+          id, brand_name, product_name, spirit_type, abv, volume_ml,
+          front_label, back_label, compliance_block, current_history_id
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL)
+        ON CONFLICT (id) DO UPDATE SET
+          brand_name       = EXCLUDED.brand_name,
+          product_name     = EXCLUDED.product_name,
+          spirit_type      = EXCLUDED.spirit_type,
+          abv              = EXCLUDED.abv,
+          volume_ml        = EXCLUDED.volume_ml,
+          front_label      = EXCLUDED.front_label,
+          back_label       = EXCLUDED.back_label,
+          compliance_block = EXCLUDED.compliance_block
+        `,
+        [labelIdNum, brandName, productName, spiritType, abv, volumeMl, frontLabel, backLabel, complianceBlock]
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL)
-      ON CONFLICT (id) DO UPDATE SET
-        brand_name       = EXCLUDED.brand_name,
-        product_name     = EXCLUDED.product_name,
-        spirit_type      = EXCLUDED.spirit_type,
-        abv              = EXCLUDED.abv,
-        volume_ml        = EXCLUDED.volume_ml,
-        front_label      = EXCLUDED.front_label,
-        back_label       = EXCLUDED.back_label,
-        compliance_block = EXCLUDED.compliance_block
-      `,
-      [
-        labelId,
-        brandName,
-        productName,
-        spiritType,
-        Number(abv),
-        Number(volumeMl),
-        frontLabel,
-        backLabel,
-        complianceBlock,
-      ]
-    )
+    } else {
+      const ins = await client.query(
+        `
+        INSERT INTO labels (
+          brand_name, product_name, spirit_type, abv, volume_ml,
+          front_label, back_label, compliance_block, current_history_id
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL)
+        RETURNING id
+        `,
+        [brandName, productName, spiritType, abv, volumeMl, frontLabel, backLabel, complianceBlock]
+      )
+      labelIdNum = ins.rows[0].id
+      action = "CREATE"
+    }
 
     const insertHistory = await client.query(
       `
@@ -254,74 +336,53 @@ router.post("/label-history", async (req, res) => {
         additional_notes,
         front_label,
         back_label,
-        compliance_block,
-        cola_status,
-        cola_application_id,
-        cola_last_changed_at
+        compliance_block
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       RETURNING *
       `,
       [
-        labelId,
+        labelIdNum,
         action,
         brandName,
         productName,
         spiritType,
-        Number(abv),
-        Number(volumeMl),
-        body.tone ?? null,
-        body.flavor_notes ?? body.flavorNotes ?? null,
-        body.region ?? null,
-        body.brand_story ?? body.brandStory ?? null,
-        body.additional_notes ?? body.additionalNotes ?? null,
+        abv,
+        volumeMl,
+        tone || null,
+        flavorNotes || null,
+        region || null,
+        brandStory || null,
+        additionalNotes || null,
         frontLabel,
         backLabel,
         complianceBlock,
-        historyColaStatus,
-        historyColaApplicationId,
-        historyColaLastChangedAt,
       ]
     )
 
     const v = insertHistory.rows[0]
-
-    await client.query(`UPDATE labels SET current_history_id = $2 WHERE id = $1`, [
-      labelId,
-      v.id,
-    ])
+    await client.query(`UPDATE labels SET current_history_id = $2 WHERE id = $1`, [labelIdNum, v.id])
 
     await client.query("COMMIT")
 
-    return res.status(201).json({
-      ok: true,
-      version: {
-        id: v.id,
-        labelId: v.label_id,
-        action: v.action,
-        brandName: v.brand_name,
-        productName: v.product_name,
-        spiritType: v.spirit_type,
-        abv: v.abv,
-        volumeMl: v.volume_ml,
-        tone: v.tone ?? null,
-        flavorNotes: v.flavor_notes ?? null,
-        region: v.region ?? null,
-        brandStory: v.brand_story ?? null,
-        additionalNotes: v.additional_notes ?? null,
-        frontLabel: v.front_label,
-        backLabel: v.back_label,
-        complianceBlock: v.compliance_block,
-        colaStatus: v.cola_status,
-        colaApplicationId: v.cola_application_id,
-        colaLastChangedAt: v.cola_last_changed_at,
-        createdAt: v.created_at,
-      },
+    return res.json({
+      id: labelIdNum,
+      brandName,
+      productName,
+      spiritType,
+      abv,
+      volumeMl,
+      tone,
+      flavorNotes,
+      region,
+      brandStory,
+      additionalNotes,
+      label: { frontLabel, backLabel, complianceBlock },
     })
   } catch (err) {
     await client.query("ROLLBACK")
     return res.status(500).json({
-      error: "Failed to insert label_history",
+      error: "Failed to persist generated label",
       detail: String(err && err.message ? err.message : err),
     })
   } finally {
@@ -334,7 +395,8 @@ router.post("/label-history", async (req, res) => {
    GET /api/labels/:labelId
    ========================================================= */
 router.get("/:labelId", async (req, res) => {
-  const labelIdNum = getLabelIdNum(req)
+  const labelIdNum = getLabelIdNum(req, res)
+  if (!labelIdNum) return
 
   try {
     const q = await pool.query(
@@ -417,7 +479,8 @@ router.get("/:labelId", async (req, res) => {
    GET /api/labels/:labelId/history?limit=50
    ========================================================= */
 router.get("/:labelId/history", async (req, res) => {
-  const labelIdNum = getLabelIdNum(req)
+  const labelIdNum = getLabelIdNum(req, res)
+  if (!labelIdNum) return
 
   const limitRaw = Number(req.query.limit || 50)
   const limit = Math.min(Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 50), 250)
@@ -481,7 +544,9 @@ router.get("/:labelId/history", async (req, res) => {
    POST /api/labels/:labelId/wizard/save
    ========================================================= */
 router.post("/:labelId/wizard/save", wizardOnly, async (req, res) => {
-  const labelIdNum = getLabelIdNum(req)
+  const labelIdNum = getLabelIdNum(req, res)
+  if (!labelIdNum) return
+
   const body = req.body || {}
 
   const brandName = body.brandName
@@ -538,22 +603,10 @@ router.post("/:labelId/wizard/save", wizardOnly, async (req, res) => {
         back_label       = EXCLUDED.back_label,
         compliance_block = EXCLUDED.compliance_block
       `,
-      [
-        labelIdNum,
-        brandName,
-        productName,
-        spiritType,
-        Number(abv),
-        Number(volumeMl),
-        frontLabel,
-        backLabel,
-        complianceBlock,
-      ]
+      [labelIdNum, brandName, productName, spiritType, Number(abv), Number(volumeMl), frontLabel, backLabel, complianceBlock]
     )
 
-    const cur = await client.query(`SELECT current_history_id FROM labels WHERE id = $1`, [
-      labelIdNum,
-    ])
+    const cur = await client.query(`SELECT current_history_id FROM labels WHERE id = $1`, [labelIdNum])
     const action = cur.rows[0]?.current_history_id ? "UPDATE" : "CREATE"
 
     const insertHistory = await client.query(
@@ -573,26 +626,11 @@ router.post("/:labelId/wizard/save", wizardOnly, async (req, res) => {
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
       RETURNING *
       `,
-      [
-        labelIdNum,
-        action,
-        brandName,
-        productName,
-        spiritType,
-        Number(abv),
-        Number(volumeMl),
-        frontLabel,
-        backLabel,
-        complianceBlock,
-      ]
+      [labelIdNum, action, brandName, productName, spiritType, Number(abv), Number(volumeMl), frontLabel, backLabel, complianceBlock]
     )
 
     const v = insertHistory.rows[0]
-
-    await client.query(`UPDATE labels SET current_history_id = $2 WHERE id = $1`, [
-      labelIdNum,
-      v.id,
-    ])
+    await client.query(`UPDATE labels SET current_history_id = $2 WHERE id = $1`, [labelIdNum, v.id])
 
     await client.query("COMMIT")
 
@@ -629,7 +667,9 @@ router.post("/:labelId/wizard/save", wizardOnly, async (req, res) => {
    PATCH /api/labels/:labelId
    ========================================================= */
 router.patch("/:labelId", async (req, res) => {
-  const labelIdNum = getLabelIdNum(req)
+  const labelIdNum = getLabelIdNum(req, res)
+  if (!labelIdNum) return
+
   const body = req.body || {}
 
   const forbidden = hasForbiddenContent(body)
@@ -669,10 +709,7 @@ router.patch("/:labelId", async (req, res) => {
   }
 
   try {
-    const q = await pool.query(
-      `UPDATE labels SET ${setClauses.join(", ")} WHERE id = $1 RETURNING *`,
-      values
-    )
+    const q = await pool.query(`UPDATE labels SET ${setClauses.join(", ")} WHERE id = $1 RETURNING *`, values)
     return res.json({ ok: true, updated: true, label: q.rows[0] })
   } catch (err) {
     return res.status(500).json({
