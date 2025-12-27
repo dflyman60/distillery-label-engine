@@ -1007,6 +1007,10 @@ router.put("/:labelId/draft", wizardOnly, async (req, res) => {
 
 // POST /api/labels/:labelId/publish  (wizard-only)
 // Promote draft -> new label_history version (append-only)
+
+// POST /api/labels/:labelId/publish  (wizard-only)
+// Promote draft -> new label_history version (append-only)
+// Falls back to latest history values when draft fields are null.
 router.post("/:labelId/publish", wizardOnly, async (req, res) => {
   const labelIdNum = getLabelIdNum(req, res)
   if (!labelIdNum) return
@@ -1023,10 +1027,48 @@ router.post("/:labelId/publish", wizardOnly, async (req, res) => {
       await client.query("ROLLBACK")
       return res.status(404).json({ error: "No draft found to publish" })
     }
-
     const draft = d.rows[0]
 
-    // NOTE: If this INSERT errors, we’ll align the column list to your schema.
+    // Latest published version (if any) used as fallback for NOT NULL columns
+    const h = await client.query(
+      `
+      SELECT *
+      FROM label_history
+      WHERE label_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+      `,
+      [labelIdNum]
+    )
+    const last = h.rowCount > 0 ? h.rows[0] : null
+
+    // Decide action
+    const action = last ? "UPDATE" : "CREATE"
+
+    // Helper: use draft value if present, else last value, else null
+    const pick = (draftVal, lastVal) =>
+      draftVal !== null && draftVal !== undefined ? draftVal : (lastVal ?? null)
+
+    // Build insert values with fallback
+    const brand_name = pick(draft.brand_name, last?.brand_name)
+    const product_name = pick(draft.product_name, last?.product_name)
+    const spirit_type = pick(draft.spirit_type, last?.spirit_type)
+    const abv = pick(draft.abv, last?.abv)
+    const volume_ml = pick(draft.volume_ml, last?.volume_ml)
+
+    const tone = pick(draft.tone, last?.tone)
+    const flavor_notes = pick(draft.flavor_notes, last?.flavor_notes)
+    const region = pick(draft.region, last?.region)
+    const brand_story = pick(draft.brand_story, last?.brand_story)
+    const additional_notes = pick(draft.additional_notes, last?.additional_notes)
+
+    const front_label = pick(draft.front_label, last?.front_label)
+    const back_label = pick(draft.back_label, last?.back_label)
+    const compliance_block = pick(draft.compliance_block, last?.compliance_block)
+
+    // Optional: keep cola_status PREPARING on new versions (or carry forward)
+    const cola_status = "PREPARING"
+
     const ins = await client.query(
       `
       INSERT INTO label_history (
@@ -1049,29 +1091,32 @@ router.post("/:labelId/publish", wizardOnly, async (req, res) => {
         cola_status
       )
       VALUES (
-        $1,
-        'UPDATE',
-        $2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+        $1,$2,
+        $3,$4,$5,$6,$7,
+        $8,$9,$10,$11,$12,
+        $13,$14,$15,
         NOW(),
-        'PREPARING'
+        $16
       )
       RETURNING *
       `,
       [
         labelIdNum,
-        draft.brand_name,
-        draft.product_name,
-        draft.spirit_type,
-        draft.abv,
-        draft.volume_ml,
-        draft.tone,
-        draft.flavor_notes,
-        draft.region,
-        draft.brand_story,
-        draft.additional_notes,
-        draft.front_label,
-        draft.back_label,
-        draft.compliance_block,
+        action,
+        brand_name,
+        product_name,
+        spirit_type,
+        abv,
+        volume_ml,
+        tone,
+        flavor_notes,
+        region,
+        brand_story,
+        additional_notes,
+        front_label,
+        back_label,
+        compliance_block,
+        cola_status,
       ]
     )
 
@@ -1085,7 +1130,6 @@ router.post("/:labelId/publish", wizardOnly, async (req, res) => {
     client.release()
   }
 })
-
 
 module.exports = router
 
