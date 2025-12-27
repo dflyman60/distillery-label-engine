@@ -87,73 +87,75 @@ function pickAllowedMetadata(body) {
    GET /api/labels/label-history?limit=50  (alias)
    Returns: { ok: true, items: [...] }
    ========================================================= */
-async function globalHistoryHandler(req, res) {
-  const limitRaw = Number(req.query.limit || 50)
-  const limit = Math.min(Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 50), 250)
+   async function globalHistoryHandler(req, res) {
+     const limitRaw = Number(req.query.limit || 50)
+     const limit = Math.min(Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 50), 250)
 
-  try {
-    const q = await pool.query(
-      `
-      SELECT
-        id,
-        label_id,
-        action,
-        brand_name,
-        product_name,
-        spirit_type,
-        abv,
-        volume_ml,
-        tone,
-        flavor_notes,
-        region,
-        brand_story,
-        additional_notes,
-        front_label,
-        back_label,
-        compliance_block,
-        created_at,
-        cola_status,
-        cola_application_id,
-        cola_last_changed_at
-      FROM label_history
-      ORDER BY created_at DESC, id DESC
-      LIMIT $1
-      `,
-      [limit]
-    )
+     try {
+       const q = await pool.query(
+         `
+         SELECT
+           id,
+           label_id,
+           action,
+           brand_name,
+           product_name,
+           spirit_type,
+           abv,
+           volume_ml,
+           tone,
+           flavor_notes,
+           region,
+           brand_story,
+           additional_notes,
+           front_label,
+           back_label,
+           compliance_block,
+           created_at,
+           cola_status,
+           cola_application_id,
+           cola_last_changed_at
+         FROM label_history
+         ORDER BY created_at DESC, id DESC
+         LIMIT $1
+         `,
+         [limit]
+       )
 
-    const items = q.rows.map((r) => ({
-      id: r.id,
-      labelId: r.label_id,
-      action: r.action,
-      brandName: r.brand_name,
-      productName: r.product_name,
-      spiritType: r.spirit_type,
-      abv: r.abv,
-      volumeMl: r.volume_ml,
-      tone: r.tone ?? null,
-      flavorNotes: r.flavor_notes ?? null,
-      region: r.region ?? null,
-      brandStory: r.brand_story ?? null,
-      additionalNotes: r.additional_notes ?? null,
-      frontLabel: r.front_label,
-      backLabel: r.back_label,
-      complianceBlock: r.compliance_block,
-      createdAt: r.created_at,
-      colaStatus: r.cola_status ?? null,
-      colaApplicationId: r.cola_application_id ?? null,
-      colaLastChangedAt: r.cola_last_changed_at ?? null,
-    }))
+       const items = q.rows.map((r) => ({
+         id: r.id,
+         historyId: r.id,
+         labelId: Number(r.label_id),
+         action: r.action,
+         brandName: r.brand_name,
+         productName: r.product_name,
+         spiritType: r.spirit_type,
+         abv: r.abv,
+         volumeMl: r.volume_ml,
+         tone: r.tone ?? null,
+         flavorNotes: r.flavor_notes ?? null,
+         region: r.region ?? null,
+         brandStory: r.brand_story ?? null,
+         additionalNotes: r.additional_notes ?? null,
+         frontLabel: r.front_label,
+         backLabel: r.back_label,
+         complianceBlock: r.compliance_block,
+         createdAt: r.created_at,
+         colaStatus: r.cola_status ?? null,
+         colaApplicationId: r.cola_application_id ?? null,
+         colaLastChangedAt: r.cola_last_changed_at ?? null,
+       }))
 
-    return res.json({ ok: true, items })
-  } catch (err) {
-    return res.status(500).json({
-      error: "Failed to load label history",
-      detail: String(err && err.message ? err.message : err),
-    })
-  }
-}
+       return res.json({ ok: true, items })
+     } catch (err) {
+       return res.status(500).json({
+         error: "Failed to load label history",
+         detail: String(err && err.message ? err.message : err),
+       })
+     }
+   }
 
+// ✅ MUST be before any "/:labelId" routes:
 router.get("/history", globalHistoryHandler)
 router.get("/label-history", globalHistoryHandler)
 
@@ -270,6 +272,105 @@ router.post("/generate", async (req, res) => {
       detail: String(err && err.message ? err.message : err),
     })
   }
+
+// PUT /api/labels/history/:labelHistoryId
+// Edit-in-place ONLY while COLA is not submitted (NULL or PREPARING)
+router.put("/history/:labelHistoryId", wizardOnly, async (req, res) => {
+  const id = Number(req.params.labelHistoryId)
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ error: "Invalid labelHistoryId" })
+  }
+
+  const {
+    brandName,
+    productName,
+    spiritType,
+    abv,
+    volumeMl,
+    tone,
+    brandStory,
+    flavorNotes,
+    region,
+    additionalNotes,
+    frontLabel,
+    backLabel,
+    complianceBlock,
+  } = req.body || {}
+
+  const client = await pool.connect()
+  try {
+    await client.query("BEGIN")
+
+    // lock rule: only editable if cola_status is NULL or PREPARING
+    const cur = await client.query(
+      `SELECT id, cola_status FROM label_history WHERE id = $1`,
+      [id]
+    )
+    if (cur.rowCount === 0) {
+      await client.query("ROLLBACK")
+      return res.status(404).json({ error: "Not found" })
+    }
+
+    const colaStatus = cur.rows[0].cola_status
+    const editable = !colaStatus || colaStatus === "PREPARING"
+    if (!editable) {
+      await client.query("ROLLBACK")
+      return res.status(409).json({
+        error: "Version locked (already submitted). Create a new version.",
+        colaStatus,
+      })
+    }
+
+    // Update only known-safe columns. (Adjust column names if yours differ.)
+    const upd = await client.query(
+      `
+      UPDATE label_history
+      SET
+        brand_name = COALESCE($2, brand_name),
+        product_name = COALESCE($3, product_name),
+        spirit_type = COALESCE($4, spirit_type),
+        abv = COALESCE($5, abv),
+        volume_ml = COALESCE($6, volume_ml),
+        tone = COALESCE($7, tone),
+        brand_story = COALESCE($8, brand_story),
+        flavor_notes = COALESCE($9, flavor_notes),
+        region = COALESCE($10, region),
+        additional_notes = COALESCE($11, additional_notes),
+        front_label = COALESCE($12, front_label),
+        back_label = COALESCE($13, back_label),
+        compliance_block = COALESCE($14, compliance_block)
+      WHERE id = $1
+      RETURNING *
+      `,
+      [
+        id,
+        brandName ?? null,
+        productName ?? null,
+        spiritType ?? null,
+        abv ?? null,
+        volumeMl ?? null,
+        tone ?? null,
+        brandStory ?? null,
+        flavorNotes ?? null,
+        region ?? null,
+        additionalNotes ?? null,
+        frontLabel ?? null,
+        backLabel ?? null,
+        complianceBlock ?? null,
+      ]
+    )
+
+    await client.query("COMMIT")
+    return res.json({ ok: true, item: upd.rows[0] })
+  } catch (e) {
+    await client.query("ROLLBACK")
+    console.error("PUT /labels/history/:labelHistoryId failed", e)
+    return res.status(500).json({ error: "Server error" })
+  } finally {
+    client.release()
+  }
+})
+
 
   const client = await pool.connect()
   try {
@@ -478,66 +579,77 @@ router.get("/:labelId", async (req, res) => {
    GET versions for a specific label (newest first)
    GET /api/labels/:labelId/history?limit=50
    ========================================================= */
-router.get("/:labelId/history", async (req, res) => {
-  const labelIdNum = getLabelIdNum(req, res)
-  if (!labelIdNum) return
+    router.get("/:labelId/history", async (req, res) => {
+      const labelIdNum = getLabelIdNum(req, res)
+      if (!labelIdNum) return
 
-  const limitRaw = Number(req.query.limit || 50)
-  const limit = Math.min(Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 50), 250)
+      const limitRaw = Number(req.query.limit || 50)
+      const limit = Math.min(Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 50), 250)
 
-  try {
-    const q = await pool.query(
-      `
-      SELECT
-        id,
-        label_id,
-        action,
-        brand_name,
-        product_name,
-        spirit_type,
-        abv,
-        volume_ml,
-        front_label,
-        back_label,
-        compliance_block,
-        created_at,
-        cola_status,
-        cola_application_id,
-        cola_last_changed_at
-      FROM label_history
-      WHERE label_id = $1
-      ORDER BY created_at DESC, id DESC
-      LIMIT $2
-      `,
-      [labelIdNum, limit]
-    )
+      try {
+        const q = await pool.query(
+          `
+          SELECT
+            id,
+            label_id,
+            action,
+            brand_name,
+            product_name,
+            spirit_type,
+            abv,
+            volume_ml,
+            tone,
+            flavor_notes,
+            region,
+            brand_story,
+            additional_notes,
+            front_label,
+            back_label,
+            compliance_block,
+            created_at,
+            cola_status,
+            cola_application_id,
+            cola_last_changed_at
+          FROM label_history
+          WHERE label_id = $1
+          ORDER BY created_at DESC, id DESC
+          LIMIT $2
+          `,
+          [labelIdNum, limit]
+        )
 
-    const versions = q.rows.map((r) => ({
-      id: r.id,
-      labelId: r.label_id,
-      action: r.action,
-      brandName: r.brand_name,
-      productName: r.product_name,
-      spiritType: r.spirit_type,
-      abv: r.abv,
-      volumeMl: r.volume_ml,
-      frontLabel: r.front_label,
-      backLabel: r.back_label,
-      complianceBlock: r.compliance_block,
-      createdAt: r.created_at,
-      colaStatus: r.cola_status ?? null,
-      colaApplicationId: r.cola_application_id ?? null,
-      colaLastChangedAt: r.cola_last_changed_at ?? null,
-    }))
+        const versions = q.rows.map((r) => ({
+          id: r.id,
+          historyId: r.id,
+          labelId: Number(r.label_id), // ✅ standardize
+          action: r.action,
+          brandName: r.brand_name,
+          productName: r.product_name,
+          spiritType: r.spirit_type,
+          abv: r.abv,
+          volumeMl: r.volume_ml,
+          tone: r.tone ?? null,
+          flavorNotes: r.flavor_notes ?? null,
+          region: r.region ?? null,
+          brandStory: r.brand_story ?? null,
+          additionalNotes: r.additional_notes ?? null,
+          frontLabel: r.front_label ?? "",
+          backLabel: r.back_label ?? "",
+          complianceBlock: r.compliance_block ?? "",
+          createdAt: r.created_at,
+          colaStatus: r.cola_status ?? null,
+          colaApplicationId: r.cola_application_id ?? null,
+          colaLastChangedAt: r.cola_last_changed_at ?? null,
+        }))
 
-    return res.json({ ok: true, versions })
-  } catch (err) {
-    return res.status(500).json({
-      error: "Failed to load history",
-      detail: String(err && err.message ? err.message : err),
+        return res.json({ ok: true, versions })
+      } catch (err) {
+        return res.status(500).json({
+          error: "Failed to load history",
+          detail: String(err && err.message ? err.message : err),
+        })
+      }
     })
-  }
-})
 
 /* =========================================================
    WIZARD SAVE
@@ -718,6 +830,262 @@ router.patch("/:labelId", async (req, res) => {
     })
   }
 })
+
+// PUT /api/labels/history/:labelHistoryId
+// Edit-in-place ONLY while COLA is not submitted (NULL or PREPARING)
+router.put("/history/:labelHistoryId", wizardOnly, async (req, res) => {
+  const id = Number(req.params.labelHistoryId)
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ error: "Invalid labelHistoryId" })
+  }
+
+  const { frontLabel, backLabel, complianceBlock } = req.body || {}
+
+  const client = await pool.connect()
+  try {
+    await client.query("BEGIN")
+
+    const cur = await client.query(
+      `SELECT id, cola_status FROM label_history WHERE id = $1`,
+      [id]
+    )
+
+    if (cur.rowCount === 0) {
+      await client.query("ROLLBACK")
+      return res.status(404).json({ error: "Not found" })
+    }
+
+    const colaStatus = cur.rows[0].cola_status
+    const editable = !colaStatus || colaStatus === "PREPARING"
+    if (!editable) {
+      await client.query("ROLLBACK")
+      return res.status(409).json({
+        error: "Version locked (already submitted). Create a new version.",
+        colaStatus,
+      })
+    }
+
+    const upd = await client.query(
+      `
+      UPDATE label_history
+      SET
+        front_label = COALESCE($2, front_label),
+        back_label = COALESCE($3, back_label),
+        compliance_block = COALESCE($4, compliance_block)
+      WHERE id = $1
+      RETURNING id, front_label, back_label, compliance_block, cola_status
+      `,
+      [id, frontLabel ?? null, backLabel ?? null, complianceBlock ?? null]
+    )
+
+    await client.query("COMMIT")
+    return res.json({ ok: true, item: upd.rows[0] })
+  } catch (e) {
+    await client.query("ROLLBACK")
+    console.error("PUT /api/labels/history/:labelHistoryId failed", e)
+    return res.status(500).json({ error: "Server error" })
+  } finally {
+    client.release()
+  }
+})
+
+// -------------------------------
+// DRAFT ROUTES (editable workspace)
+// label_id is BIGINT
+// -------------------------------
+
+// GET /api/labels/:labelId/draft
+router.get("/:labelId/draft", async (req, res) => {
+  const labelIdNum = getLabelIdNum(req, res)
+  if (!labelIdNum) return
+
+  try {
+    const q = await pool.query(
+      `SELECT * FROM label_draft WHERE label_id = $1`,
+      [labelIdNum]
+    )
+
+    if (q.rowCount > 0) {
+      return res.json({ ok: true, draft: q.rows[0] })
+    }
+
+    const ins = await pool.query(
+      `INSERT INTO label_draft (label_id) VALUES ($1) RETURNING *`,
+      [labelIdNum]
+    )
+
+    return res.json({ ok: true, draft: ins.rows[0] })
+  } catch (e) {
+    console.error("GET /labels/:labelId/draft failed", e)
+    return res.status(500).json({ error: "Server error" })
+  }
+})
+
+// PUT /api/labels/:labelId/draft  (wizard-only)
+router.put("/:labelId/draft", wizardOnly, async (req, res) => {
+  const labelIdNum = getLabelIdNum(req, res)
+  if (!labelIdNum) return
+
+  const {
+    brandName,
+    productName,
+    spiritType,
+    abv,
+    volumeMl,
+    tone,
+    brandStory,
+    flavorNotes,
+    region,
+    additionalNotes,
+    frontLabel,
+    backLabel,
+    complianceBlock,
+  } = req.body || {}
+
+  try {
+    const up = await pool.query(
+      `
+      INSERT INTO label_draft (
+        label_id,
+        brand_name,
+        product_name,
+        spirit_type,
+        abv,
+        volume_ml,
+        tone,
+        brand_story,
+        flavor_notes,
+        region,
+        additional_notes,
+        front_label,
+        back_label,
+        compliance_block,
+        updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+      ON CONFLICT (label_id) DO UPDATE SET
+        brand_name = COALESCE(EXCLUDED.brand_name, label_draft.brand_name),
+        product_name = COALESCE(EXCLUDED.product_name, label_draft.product_name),
+        spirit_type = COALESCE(EXCLUDED.spirit_type, label_draft.spirit_type),
+        abv = COALESCE(EXCLUDED.abv, label_draft.abv),
+        volume_ml = COALESCE(EXCLUDED.volume_ml, label_draft.volume_ml),
+        tone = COALESCE(EXCLUDED.tone, label_draft.tone),
+        brand_story = COALESCE(EXCLUDED.brand_story, label_draft.brand_story),
+        flavor_notes = COALESCE(EXCLUDED.flavor_notes, label_draft.flavor_notes),
+        region = COALESCE(EXCLUDED.region, label_draft.region),
+        additional_notes = COALESCE(EXCLUDED.additional_notes, label_draft.additional_notes),
+        front_label = COALESCE(EXCLUDED.front_label, label_draft.front_label),
+        back_label = COALESCE(EXCLUDED.back_label, label_draft.back_label),
+        compliance_block = COALESCE(EXCLUDED.compliance_block, label_draft.compliance_block),
+        updated_at = NOW()
+      RETURNING *
+      `,
+      [
+        labelIdNum,
+        brandName ?? null,
+        productName ?? null,
+        spiritType ?? null,
+        abv ?? null,
+        volumeMl != null ? Number(volumeMl) : null,
+        tone ?? null,
+        brandStory ?? null,
+        flavorNotes ?? null,
+        region ?? null,
+        additionalNotes ?? null,
+        frontLabel ?? null,
+        backLabel ?? null,
+        complianceBlock ?? null,
+      ]
+    )
+
+    return res.json({ ok: true, draft: up.rows[0] })
+  } catch (e) {
+    console.error("PUT /labels/:labelId/draft failed", e)
+    return res.status(500).json({ error: "Server error" })
+  }
+})
+
+// POST /api/labels/:labelId/publish  (wizard-only)
+// Promote draft -> new label_history version (append-only)
+router.post("/:labelId/publish", wizardOnly, async (req, res) => {
+  const labelIdNum = getLabelIdNum(req, res)
+  if (!labelIdNum) return
+
+  const client = await pool.connect()
+  try {
+    await client.query("BEGIN")
+
+    const d = await client.query(
+      `SELECT * FROM label_draft WHERE label_id = $1`,
+      [labelIdNum]
+    )
+    if (d.rowCount === 0) {
+      await client.query("ROLLBACK")
+      return res.status(404).json({ error: "No draft found to publish" })
+    }
+
+    const draft = d.rows[0]
+
+    // NOTE: If this INSERT errors, we’ll align the column list to your schema.
+    const ins = await client.query(
+      `
+      INSERT INTO label_history (
+        label_id,
+        action,
+        brand_name,
+        product_name,
+        spirit_type,
+        abv,
+        volume_ml,
+        tone,
+        flavor_notes,
+        region,
+        brand_story,
+        additional_notes,
+        front_label,
+        back_label,
+        compliance_block,
+        created_at,
+        cola_status
+      )
+      VALUES (
+        $1,
+        'UPDATE',
+        $2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+        NOW(),
+        'PREPARING'
+      )
+      RETURNING *
+      `,
+      [
+        labelIdNum,
+        draft.brand_name,
+        draft.product_name,
+        draft.spirit_type,
+        draft.abv,
+        draft.volume_ml,
+        draft.tone,
+        draft.flavor_notes,
+        draft.region,
+        draft.brand_story,
+        draft.additional_notes,
+        draft.front_label,
+        draft.back_label,
+        draft.compliance_block,
+      ]
+    )
+
+    await client.query("COMMIT")
+    return res.json({ ok: true, item: ins.rows[0] })
+  } catch (e) {
+    await client.query("ROLLBACK")
+    console.error("POST /labels/:labelId/publish failed", e)
+    return res.status(500).json({ error: "Server error" })
+  } finally {
+    client.release()
+  }
+})
+
 
 module.exports = router
 
