@@ -84,38 +84,12 @@ function pickAllowedMetadata(body) {
    CREATE NEW LABEL (allocates labels.id)
    POST /api/labels/new
    ========================================================= */
-
-// POST /api/labels/new
-router.post("/new", wizardOnly, async (req, res) => {
+router.post("/new", wizardOnly, async (_req, res) => {
   try {
+    // If your labels table allows nulls for most fields, this is enough.
     const q = await pool.query(
-      `
-      INSERT INTO labels (
-        brand_name,
-        product_name,
-        spirit_type,
-        abv,
-        volume_ml,
-        front_label,
-        back_label,
-        compliance_block,
-        current_history_id
-      )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL)
-      RETURNING id
-      `,
-      [
-        "Draft",          // brand_name
-        "Untitled",       // product_name
-        "TBD",            // spirit_type
-        0,                // abv
-        750,              // volume_ml
-        "",               // front_label
-        "",               // back_label
-        "",               // compliance_block
-      ]
+      `INSERT INTO labels (current_history_id) VALUES (NULL) RETURNING id`
     )
-
     return res.json({ ok: true, id: q.rows[0].id })
   } catch (err) {
     return res.status(500).json({
@@ -124,8 +98,6 @@ router.post("/new", wizardOnly, async (req, res) => {
     })
   }
 })
-
-
 
 
 /* =========================================================
